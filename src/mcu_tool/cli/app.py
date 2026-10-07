@@ -29,11 +29,13 @@ workspace_app = typer.Typer(help="Workspace management", no_args_is_help=True)
 tools_app = typer.Typer(help="Toolchain detection", no_args_is_help=True)
 project_app = typer.Typer(help="Project inspect", no_args_is_help=True)
 serial_app = typer.Typer(help="Serial monitor", no_args_is_help=True)
+env_app = typer.Typer(help="Toolchain environment overrides", no_args_is_help=True)
 
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(tools_app, name="tools")
 app.add_typer(project_app, name="project")
 app.add_typer(serial_app, name="serial")
+app.add_typer(env_app, name="env")
 
 console = Console(stderr=False)
 err_console = Console(stderr=True)
@@ -360,6 +362,97 @@ def serial_attach(
 ) -> None:
     code = serial_mon.attach_cli(port, baud, json_events=(format == Format.json))
     raise typer.Exit(code)
+
+
+# --- env ---
+
+
+@env_app.command("list")
+def env_list(
+    format: Format = typer.Option(Format.text, "--format"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
+) -> None:
+    svc, _ = _service()
+    try:
+        svc.ensure_workspace(str(workspace) if workspace else None)
+        rows = svc.env_list()
+    except WorkspaceError as e:
+        _die(str(e), e.exit_code)
+    if format == Format.json:
+        print(json.dumps([{"key": k, "value": v, "source": s} for k, v, s in rows], indent=2))
+        return
+    if not rows:
+        console.print("No tool environment overrides or common keys set.")
+        return
+    table = Table(title="Toolchain environment")
+    table.add_column("Key")
+    table.add_column("Value")
+    table.add_column("Source")
+    for k, v, s in rows:
+        display = v if len(v) < 80 else v[:77] + "…"
+        table.add_row(k, display, s)
+    console.print(table)
+
+
+@env_app.command("set")
+def env_set(
+    assignment: str = typer.Argument(..., help="KEY=VALUE (e.g. IDF_PATH=/opt/esp)"),
+    workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
+    doctor: bool = typer.Option(True, "--doctor/--no-doctor", help="Re-run tools doctor after set"),
+) -> None:
+    if "=" not in assignment:
+        _die("Expected KEY=VALUE", ExitCode.WORKSPACE_ERROR)
+    key, value = assignment.split("=", 1)
+    svc, _ = _service()
+    try:
+        svc.ensure_workspace(str(workspace) if workspace else None)
+        svc.env_set(key, value)
+    except (WorkspaceError, ValueError) as e:
+        code = getattr(e, "exit_code", ExitCode.WORKSPACE_ERROR)
+        _die(str(e), code)
+    console.print(f"Set [bold]{key}[/bold] (persisted in workspace toolEnv)")
+    if doctor:
+        tools = svc.tools_doctor()
+        missing = [t.name for t in tools if t.status == "missing"]
+        if missing:
+            console.print(f"Doctor: still missing {', '.join(missing)}")
+        else:
+            console.print("Doctor: toolchains OK")
+
+
+@env_app.command("unset")
+def env_unset(
+    key: str = typer.Argument(...),
+    workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
+) -> None:
+    svc, _ = _service()
+    try:
+        svc.ensure_workspace(str(workspace) if workspace else None)
+        svc.env_unset(key)
+    except WorkspaceError as e:
+        _die(str(e), e.exit_code)
+    console.print(f"Unset [bold]{key}[/bold]")
+
+
+@env_app.command("reload")
+def env_reload(
+    workspace: Optional[Path] = typer.Option(None, "--workspace", "-w"),
+    format: Format = typer.Option(Format.text, "--format"),
+) -> None:
+    """Re-apply workspace toolEnv to this process and re-run doctor."""
+    svc, _ = _service()
+    try:
+        svc.ensure_workspace(str(workspace) if workspace else None)
+        tools = svc.env_reload()
+    except WorkspaceError as e:
+        _die(str(e), e.exit_code)
+    if format == Format.json:
+        print(json.dumps([t.to_dict() for t in tools], indent=2))
+        return
+    console.print("Re-applied toolEnv; doctor:")
+    for t in tools:
+        style = {"ok": "green", "missing": "red", "optional": "yellow"}.get(t.status, "")
+        console.print(f"  [{style}]{t.status}[/{style}] {t.name}  {t.path or ''}")
 
 
 @app.command("gui")

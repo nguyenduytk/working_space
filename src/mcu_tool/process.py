@@ -42,9 +42,9 @@ def run_command(
 ) -> int:
     """Run command, stream stdout/stderr line-by-line. Returns process exit code."""
     log = on_line or (lambda _line, _stream: None)
-    merged_env = os.environ.copy()
-    if env:
-        merged_env.update(env)
+    from mcu_tool.envconfig import effective_environ
+
+    merged_env = effective_environ(env)
 
     kwargs: dict = {
         "cwd": cwd,

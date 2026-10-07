@@ -18,6 +18,7 @@ from mcu_tool.models import (
     ProjectKind,
     Workspace,
 )
+from mcu_tool import envconfig
 from mcu_tool import workspace as ws_io
 from mcu_tool.tools import doctor, which_tool
 
@@ -29,14 +30,26 @@ class CoreService:
         self._active_jobs: dict[str, str] = {}  # project_id -> job_id
         self._serial_paused_for_flash = False
 
+    def _sync_tool_env_from_workspace(self) -> None:
+        if self.workspace is not None:
+            envconfig.load_overrides(self.workspace.toolEnv, apply=True)
+
+    def _persist_tool_env(self) -> None:
+        if self.workspace is None:
+            return
+        self.workspace.toolEnv = envconfig.get_overrides()
+        ws_io.save_workspace(self.workspace)
+
     # --- workspace ---
 
     def init_workspace(self, path: str | None = None, name: str = "MCU Workspace") -> Workspace:
         self.workspace = ws_io.init_workspace(Path(path) if path else None, name=name)
+        self._sync_tool_env_from_workspace()
         return self.workspace
 
     def load_workspace(self, path: str | None = None) -> Workspace:
         self.workspace = ws_io.load_workspace(Path(path) if path else None)
+        self._sync_tool_env_from_workspace()
         return self.workspace
 
     def ensure_workspace(self, path: str | None = None) -> Workspace:
@@ -109,10 +122,34 @@ class CoreService:
     # --- tools ---
 
     def tools_doctor(self):
+        envconfig.apply_to_process()
         return doctor()
 
     def tools_which(self, name: str):
+        envconfig.apply_to_process()
         return which_tool(name)
+
+    # --- tool environment ---
+
+    def env_list(self) -> list[tuple[str, str, str]]:
+        self.ensure_workspace()
+        return envconfig.list_relevant()
+
+    def env_set(self, key: str, value: str) -> None:
+        self.ensure_workspace()
+        envconfig.set_override(key, value, apply=True)
+        self._persist_tool_env()
+
+    def env_unset(self, key: str) -> None:
+        self.ensure_workspace()
+        envconfig.unset_override(key, apply=True)
+        self._persist_tool_env()
+
+    def env_reload(self) -> list:
+        """Re-apply workspace toolEnv to the process and re-run doctor."""
+        self.ensure_workspace()
+        self._sync_tool_env_from_workspace()
+        return self.tools_doctor()
 
     # --- project inspect ---
 
