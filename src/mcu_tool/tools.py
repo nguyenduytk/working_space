@@ -25,10 +25,12 @@ HINTS = {
 
 
 def _which(names: list[str]) -> str | None:
+    """Resolve executables using the current process PATH (after env overrides)."""
+    path_env = os.environ.get("PATH")
     for name in names:
-        path = shutil.which(name)
-        if path:
-            return path
+        found = shutil.which(name, path=path_env) if path_env else shutil.which(name)
+        if found:
+            return found
     return None
 
 
@@ -113,6 +115,14 @@ def _stlink_path() -> str | None:
 
 
 def doctor() -> list[ToolInfo]:
+    """Scan toolchains from the live process environment (no result cache).
+
+    Callers that change PATH / IDF_PATH / PICO_SDK_PATH must update ``os.environ``
+    (via ``mcu_tool.envconfig``) before invoking doctor again.
+    """
+    from mcu_tool.envconfig import apply_to_process
+
+    apply_to_process()
     tools: list[ToolInfo] = []
 
     pio = _pio_path()

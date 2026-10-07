@@ -89,22 +89,27 @@ class Workspace:
     name: str = "MCU Workspace"
     projects: list[Project] = field(default_factory=list)
     path: str | None = None  # path to mcu-workspace.json
+    toolEnv: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
             "name": self.name,
             "projects": [p.to_dict() for p in self.projects],
+            "toolEnv": dict(self.toolEnv),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], path: str | None = None) -> Workspace:
         projects = [Project.from_dict(p) for p in data.get("projects", [])]
+        raw_env = data.get("toolEnv") or data.get("tool_env") or {}
+        tool_env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
         return cls(
             version=int(data.get("version", 1)),
             name=data.get("name") or "MCU Workspace",
             projects=projects,
             path=path,
+            toolEnv=tool_env,
         )
 
 

@@ -1,14 +1,18 @@
-"""Main window: workspace sidebar + project tabs + log."""
+"""Main window: workspace sidebar + project tabs + log + environment."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QTextCharFormat
+from PySide6.QtGui import QAction, QTextCharFormat
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -17,6 +21,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QToolBar,
     QVBoxLayout,
@@ -24,7 +30,10 @@ from PySide6.QtWidgets import (
 )
 
 from mcu_tool.adapters import serial_mon
+from mcu_tool.envconfig import COMMON_KEYS
 from mcu_tool.events import Event, EventBus
+from mcu_tool.gui import theme as gui_theme
+from mcu_tool.logstyle import classify_line
 from mcu_tool.models import ProbeType, Project
 from mcu_tool.service import CoreService
 from mcu_tool.workspace import WorkspaceError
@@ -45,6 +54,43 @@ class JobWorker(QThread):
             self.finished_ok.emit(result.ok, result.exit_code, result.message)
         except Exception as e:  # noqa: BLE001
             self.finished_ok.emit(False, 5, str(e))
+
+
+class EnvDialog(QDialog):
+    """Quick set KEY=VALUE for toolchain env."""
+
+    def __init__(self, parent=None, preset_key: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Set environment variable")
+        layout = QFormLayout(self)
+        self.key_edit = QComboBox()
+        self.key_edit.setEditable(True)
+        self.key_edit.addItems(list(COMMON_KEYS))
+        if preset_key:
+            self.key_edit.setCurrentText(preset_key)
+        self.value_edit = QLineEdit()
+        self.value_edit.setPlaceholderText("Value or path…")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        val_row = QHBoxLayout()
+        val_row.addWidget(self.value_edit)
+        val_row.addWidget(browse)
+        layout.addRow("Key", self.key_edit)
+        layout.addRow("Value", val_row)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def _browse(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Select directory")
+        if path:
+            self.value_edit.setText(path)
+
+    def assignment(self) -> tuple[str, str]:
+        return self.key_edit.currentText().strip(), self.value_edit.text()
 
 
 class ProjectTab(QWidget):
@@ -83,6 +129,7 @@ class ProjectTab(QWidget):
 
         split = QSplitter(Qt.Orientation.Vertical)
         self.log = QPlainTextEdit()
+        self.log.setObjectName("logPane")
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("Build / flash log…")
         split.addWidget(self.log)
@@ -98,6 +145,7 @@ class ProjectTab(QWidget):
         s_bar.addStretch()
         s_layout.addLayout(s_bar)
         self.serial_view = QPlainTextEdit()
+        self.serial_view.setObjectName("serialPane")
         self.serial_view.setReadOnly(True)
         s_layout.addWidget(self.serial_view)
         split.addWidget(serial_box)
@@ -143,21 +191,23 @@ class ProjectTab(QWidget):
             self.port_combo.setCurrentText(current)
 
     def append_log(self, line: str, stream: str = "stdout") -> None:
+        text, role = classify_line(line, stream=stream)
         fmt = QTextCharFormat()
-        if stream == "stderr":
-            fmt.setForeground(QColor("#c44"))
-        elif stream == "system":
-            fmt.setForeground(QColor("#888"))
-        else:
-            fmt.setForeground(QColor("#ddd"))
+        fmt.setForeground(gui_theme.log_color(role))
         cursor = self.log.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(line + "\n", fmt)
+        cursor.insertText(text + "\n", fmt)
         self.log.setTextCursor(cursor)
         self.log.ensureCursorVisible()
 
     def append_serial(self, line: str) -> None:
-        self.serial_view.appendPlainText(line)
+        text, role = classify_line(line, stream="stdout")
+        fmt = QTextCharFormat()
+        fmt.setForeground(gui_theme.log_color(role))
+        cursor = self.serial_view.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(text + "\n", fmt)
+        self.serial_view.setTextCursor(cursor)
 
     def _set_busy(self, busy: bool) -> None:
         for b in (self.btn_build, self.btn_flash, self.btn_clean):
@@ -237,7 +287,8 @@ class MainWindow(QMainWindow):
     def __init__(self, service: CoreService | None = None) -> None:
         super().__init__()
         self.setWindowTitle("MCU Workspace Tool")
-        self.resize(1100, 720)
+        self.resize(1180, 760)
+        self._dark = True
 
         self.bus = EventBus()
         self.service = service or CoreService(self.bus)
@@ -270,32 +321,71 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_remove)
         btn_row.addWidget(self.btn_doctor)
         side_layout.addLayout(btn_row)
+
+        # Environment section
+        env_label = QLabel("Environment")
+        side_layout.addWidget(env_label)
+        hint = QLabel("Overrides PATH / SDK paths, then re-detects tools.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        side_layout.addWidget(hint)
+        self.env_table = QTableWidget(0, 3)
+        self.env_table.setHorizontalHeaderLabels(["Key", "Value", "Src"])
+        self.env_table.horizontalHeader().setStretchLastSection(True)
+        self.env_table.setColumnWidth(0, 110)
+        self.env_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.env_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        side_layout.addWidget(self.env_table)
+        env_btns = QHBoxLayout()
+        self.btn_env_set = QPushButton("Set…")
+        self.btn_env_unset = QPushButton("Unset")
+        self.btn_env_reload = QPushButton("Re-detect")
+        env_btns.addWidget(self.btn_env_set)
+        env_btns.addWidget(self.btn_env_unset)
+        env_btns.addWidget(self.btn_env_reload)
+        side_layout.addLayout(env_btns)
+
         splitter.addWidget(side)
 
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self._close_tab)
         splitter.addWidget(self.tabs)
-        splitter.setSizes([260, 840])
+        splitter.setSizes([320, 860])
 
         self.setStatusBar(QStatusBar())
-        self._refresh_doctor_status()
 
         toolbar = QToolBar("Main")
         self.addToolBar(toolbar)
         act_refresh = QAction("Refresh", self)
         act_refresh.triggered.connect(self.refresh_projects)
         toolbar.addAction(act_refresh)
+        self.act_theme = QAction("Light theme", self)
+        self.act_theme.triggered.connect(self._toggle_theme)
+        toolbar.addAction(self.act_theme)
 
         self.btn_add.clicked.connect(self._add_project)
         self.btn_remove.clicked.connect(self._remove_project)
         self.btn_doctor.clicked.connect(self._show_doctor)
+        self.btn_env_set.clicked.connect(self._env_set)
+        self.btn_env_unset.clicked.connect(self._env_unset)
+        self.btn_env_reload.clicked.connect(self._env_reload)
         self.project_list.itemDoubleClicked.connect(self._open_selected)
 
         self.refresh_projects()
+        self._refresh_env_table()
+        self._refresh_doctor_status()
+
+    def _toggle_theme(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        self._dark = not self._dark
+        app = QApplication.instance()
+        if app:
+            gui_theme.apply_theme(app, dark=self._dark)
+        self.act_theme.setText("Light theme" if self._dark else "Dark theme")
 
     def _on_bus_event(self, event: Event) -> None:
-        # Marshal to GUI thread
         self.log_event.emit(event)
 
     @Slot(object)
@@ -320,6 +410,71 @@ class MainWindow(QMainWindow):
         name = self.service.workspace.name if self.service.workspace else "Workspace"
         self.setWindowTitle(f"MCU Workspace Tool — {name}")
 
+    def _refresh_env_table(self) -> None:
+        rows = self.service.env_list()
+        self.env_table.setRowCount(len(rows))
+        for i, (k, v, src) in enumerate(rows):
+            self.env_table.setItem(i, 0, QTableWidgetItem(k))
+            display = v if len(v) < 48 else v[:45] + "…"
+            item = QTableWidgetItem(display)
+            item.setToolTip(v)
+            self.env_table.setItem(i, 1, item)
+            self.env_table.setItem(i, 2, QTableWidgetItem(src))
+
+    def _env_set(self) -> None:
+        dlg = EnvDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        key, value = dlg.assignment()
+        if not key:
+            QMessageBox.warning(self, "Environment", "Key is required.")
+            return
+        try:
+            self.service.env_set(key, value)
+        except (WorkspaceError, ValueError) as e:
+            QMessageBox.warning(self, "Environment", str(e))
+            return
+        self._refresh_env_table()
+        self._refresh_doctor_status()
+        tab = self.tabs.currentWidget()
+        if isinstance(tab, ProjectTab):
+            tab.append_log(f"Set {key} — re-ran toolchain doctor", "system")
+
+    def _env_unset(self) -> None:
+        row = self.env_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Environment", "Select a row to unset.")
+            return
+        key_item = self.env_table.item(row, 0)
+        src_item = self.env_table.item(row, 2)
+        if not key_item:
+            return
+        key = key_item.text()
+        if src_item and src_item.text() != "override":
+            QMessageBox.information(
+                self,
+                "Environment",
+                f"{key} comes from the process environment. "
+                "Set an override to replace it, or restart after changing system env.",
+            )
+            return
+        try:
+            self.service.env_unset(key)
+        except WorkspaceError as e:
+            QMessageBox.warning(self, "Environment", str(e))
+            return
+        self._refresh_env_table()
+        self._refresh_doctor_status()
+
+    def _env_reload(self) -> None:
+        tools = self.service.env_reload()
+        self._refresh_env_table()
+        self._refresh_doctor_status()
+        missing = [t.name for t in tools if t.status == "missing"]
+        msg = "Re-detected toolchains. "
+        msg += ("Missing: " + ", ".join(missing)) if missing else "All required tools OK."
+        QMessageBox.information(self, "Re-detect", msg)
+
     def _add_project(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Add MCU project")
         if not path:
@@ -342,7 +497,6 @@ class MainWindow(QMainWindow):
         except WorkspaceError as e:
             QMessageBox.warning(self, "Remove", str(e))
             return
-        # Close matching tab
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if isinstance(w, ProjectTab) and w.project.id == pid:
@@ -386,6 +540,7 @@ class MainWindow(QMainWindow):
             lines.append(f"{t.name}: {t.status}  {loc}{hint}")
         QMessageBox.information(self, "Toolchain doctor", "\n".join(lines))
         self._refresh_doctor_status()
+        self._refresh_env_table()
 
     def _refresh_doctor_status(self) -> None:
         tools = self.service.tools_doctor()

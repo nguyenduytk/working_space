@@ -52,7 +52,16 @@ mcu clean <id|path> [--env NAME]
 # Serial
 mcu serial list
 mcu serial attach --port /dev/ttyACM0 --baud 115200
+
+# Toolchain environment (persisted in workspace toolEnv; re-runs detect)
+mcu env list
+mcu env set IDF_PATH=/path/to/esp-idf
+mcu env set PICO_SDK_PATH=/path/to/pico-sdk
+mcu env reload
+mcu env unset IDF_PATH
 ```
+
+Setting SDK paths in the OS while the GUI is already running does **not** update the process. Use **Environment → Set / Re-detect** in the GUI (or `mcu env set` / `mcu env reload`) so doctor and builds see the new values.
 
 Exit codes: `0` OK, `2` tool missing, `3` build fail, `4` flash fail, `5` workspace/project error.
 
