@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcu-workspace-tool"
+version = "0.1.0"
+description = "Desktop + CLI workspace tool for MCU build & flash (PlatformIO, Pico, ESP-IDF, STM32)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "MCU Workspace Tool" }]
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "pyserial>=3.5",
+  "PySide6>=6.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+mcu = "mcu_tool.cli.app:main"
+mcu-gui = "mcu_tool.gui.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mcu_tool = ["py.typed"]
